@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: wormgpt-bot
+    runtime: python311
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    envVars:
+      - key: TELEGRAM_TOKEN
+        scope: run
+      - key: OPENROUTER_KEY
+        scope: run
+      - key: MODEL_NAME
+        value: deepseek/deepseek-v4-flash
+        scope: run
+      - key: BASE_URL
+        value: https://openrouter.ai/api/v1
+        scope: run
+      - key: DATABASE_PATH
+        value: /var/data/date_user.db
+        scope: run
+      - key: ENABLE_HISTORY
+        value: true
+        scope: run
+      - key: PYTHONUNBUFFERED
+        value: "1"
+        scope: run
