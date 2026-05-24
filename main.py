@@ -52,7 +52,7 @@ ACTIVE_USER_WINDOW_MINUTES = max(1, get_int_env("ACTIVE_USER_WINDOW_MINUTES", 30
 USER_PAGE_SIZE = 8
 USER_HOURLY_LIMIT = max(1, get_int_env("USER_HOURLY_LIMIT", 5))
 RATE_LIMIT_WINDOW_HOURS = max(1, get_int_env("RATE_LIMIT_WINDOW_HOURS", 1))
-CONTEXT_WINDOW_MESSAGES = max(0, get_int_env("CONTEXT_WINDOW_MESSAGES", 10))
+CONTEXT_WINDOW_MESSAGES = max(0, get_int_env("CONTEXT_WINDOW_MESSAGES", 5))
 API_MAX_RETRIES = max(1, get_int_env("API_MAX_RETRIES", 2))
 API_RETRY_DELAY_SECONDS = max(1, get_int_env("API_RETRY_DELAY_SECONDS", 2))
 API_TIMEOUT_SECONDS = max(5, get_int_env("API_TIMEOUT_SECONDS", 60))
@@ -2139,6 +2139,16 @@ async def error_handler(update, context):
 
 async def post_init(application):
     """Restore persisted background reminder tasks after bot startup."""
+    try:
+        # Clear any stale updates from Telegram API (from previous bot session)
+        print("[INFO] Clearing stale updates from Telegram API...")
+        # Get and discard old updates to flush the queue
+        updates = await application.bot.get_updates(offset=-1)
+        if updates:
+            print(f"[INFO] Cleared {len(updates)} stale updates from queue")
+    except Exception as e:
+        print(f"[WARN] Could not clear stale updates: {e}")
+    
     await restore_rate_limit_reset_notices(application)
 
 
@@ -2164,6 +2174,10 @@ startup_msg = f"""
 {arrow} Bot is now active {arrow}
 {lightning} Time: {time.strftime("%H:%M:%S")}
 {skull} Running on Render.com {skull}
+{line}
+[CONFIG] Max tokens per request: 4096
+[CONFIG] Context window: 5 messages
+[CONFIG] User rate limit: {USER_HOURLY_LIMIT} question(s) per {RATE_LIMIT_WINDOW_HOURS} hour(s)
 {line}
 """
 
@@ -2192,20 +2206,44 @@ def acquire_process_lock():
         try:
             with open(LOCK_FILE, "r") as f:
                 old_pid = int(f.read().strip())
+            
             # Check if old process is still running
+            old_running = False
             if sys.platform == "win32":
                 import subprocess
                 result = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"], capture_output=True)
-                if b"No tasks" not in result.stdout:
-                    print(f"[ERROR] Another bot instance (PID {old_pid}) is already running.")
-                    print("[ERROR] Kill the old process or wait for it to finish.")
-                    sys.exit(1)
+                old_running = b"No tasks" not in result.stdout
             else:
-                os.kill(old_pid, 0)  # Check if process exists
-                print(f"[ERROR] Another bot instance (PID {old_pid}) is already running.")
-                sys.exit(1)
-        except (ValueError, ProcessLookupError, FileNotFoundError):
-            pass  # Old lock file is stale
+                try:
+                    os.kill(old_pid, 0)  # Signal 0 to check if process exists
+                    old_running = True
+                except ProcessLookupError:
+                    old_running = False
+            
+            if old_running:
+                print(f"[ERROR] Another bot instance (PID {old_pid}) is still running.")
+                print("[ERROR] Waiting 30 seconds for it to terminate...")
+                import time as time_module
+                for i in range(30):
+                    try:
+                        os.kill(old_pid, 0)
+                    except ProcessLookupError:
+                        print(f"[INFO] Old process terminated after {i} seconds.")
+                        break
+                    if i < 29:
+                        time_module.sleep(1)
+                else:
+                    print("[ERROR] Old process did not terminate. Forcing exit.")
+                    sys.exit(1)
+        except (ValueError, FileNotFoundError):
+            pass  # Lock file is corrupted or missing
+    
+    # Remove stale lock file and create new one
+    try:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except Exception:
+        pass
     
     with open(LOCK_FILE, "w") as f:
         f.write(str(os.getpid()))
@@ -2239,8 +2277,8 @@ def wait_for_retry_delay(seconds):
 
 def run_bot_with_retry():
     """Run bot with graceful handling for polling conflicts."""
-    max_retries = 3
-    retry_delay = 5
+    max_retries = 5
+    retry_delay = 10  # Start with 10 second delay for polling conflicts
 
     for attempt in range(1, max_retries + 1):
         application = build_application()
@@ -2256,13 +2294,16 @@ def run_bot_with_retry():
         except Exception as e:
             if is_polling_conflict_error(e):
                 print(f"[WARN] Polling conflict detected (Retry {attempt}/{max_retries} in {retry_delay}s)")
+                print("[INFO] Waiting for previous bot session to fully terminate on Telegram servers...")
 
                 if attempt >= max_retries:
-                    print("[ERROR] Max retries exceeded for polling conflict.")
+                    print("[ERROR] Max retries exceeded. The previous bot instance may still be active.")
+                    print("[ERROR] Try manually stopping the old deployment on Render.")
                     return 1
 
+                # Exponential backoff with longer waits for polling conflicts
                 wait_for_retry_delay(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)
+                retry_delay = min(retry_delay * 2, 120)  # Cap at 2 minutes
                 continue
 
             print(f"[ERROR] Fatal error during polling: {e}")
@@ -2273,13 +2314,16 @@ def run_bot_with_retry():
 
 if __name__ == "__main__":
     try:
+        print("[INFO] Acquiring process lock...")
         acquire_process_lock()
+        print(f"[OK] Process lock acquired (PID: {os.getpid()})")
         atexit.register(release_process_lock)
         signal.signal(signal.SIGINT, lambda s, f: (
             print("\n[INFO] Bot stopped by user"),
             release_process_lock(),
             sys.exit(0)
         ))
+        print(startup_msg)
         sys.exit(run_bot_with_retry())
     except KeyboardInterrupt:
         print("\n[INFO] Bot stopped by user")
