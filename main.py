@@ -1611,10 +1611,11 @@ startup_msg = f"""
 
 print(startup_msg)
 
-import asyncio
-try:
-    asyncio.get_event_loop()
-except RuntimeError:
-    asyncio.set_event_loop(asyncio.new_event_loop())
+# Python 3.14+ requires explicit event loop initialization
+if sys.platform == 'win32':
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+loop = asyncio.new_event_loop()
+asyncio.set_event_loop(loop)
 
 app.run_polling()
