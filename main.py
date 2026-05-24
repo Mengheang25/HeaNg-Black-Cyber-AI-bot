@@ -290,6 +290,31 @@ class ConversationDB:
             sys.stderr.write(f"[ERROR] Error retrieving history: {e}\n")
             return []
 
+    def clear_user_history(self, user_id):
+        """Delete all conversation history for a user."""
+        if not ENABLE_HISTORY:
+            return False
+
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+
+            cursor.execute(
+                """
+                DELETE FROM conversations
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+
+            conn.commit()
+            rows_deleted = cursor.rowcount
+            conn.close()
+            return rows_deleted > 0
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Error clearing history: {e}\n")
+            return False
+
     def record_rate_limit_event(self, user_id):
         """Record a processed user request for rate limiting."""
         try:
@@ -1317,6 +1342,29 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(history_text)
 
 
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle /clearhistory command to delete conversation history."""
+    user = update.effective_user
+    user_id = user.id
+    register_user(user)
+
+    if not is_admin(user_id) and db.is_user_blocked(user_id):
+        await reply_blocked(update)
+        return
+
+    arrow = DECORATIONS["arrow"]
+    skull = DECORATIONS["skull"]
+
+    if not ENABLE_HISTORY:
+        await update.message.reply_text(f"{arrow} Conversation History Is Disabled")
+        return
+
+    if db.clear_user_history(user_id):
+        await update.message.reply_text(f"{skull} Your Conversation History Has Been Cleared")
+    else:
+        await update.message.reply_text(f"{arrow} No History To Clear")
+
+
 async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Admin dashboard command."""
     user = update.effective_user
@@ -1592,6 +1640,7 @@ async def error_handler(update, context):
 app.add_error_handler(error_handler)
 app.add_handler(CommandHandler("start", start))
 app.add_handler(CommandHandler("history", show_history))
+app.add_handler(CommandHandler("clearhistory", clear_history))
 app.add_handler(CommandHandler(["dashboard", "dashoard"], dashboard))
 app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 app.add_handler(CallbackQueryHandler(callback))
