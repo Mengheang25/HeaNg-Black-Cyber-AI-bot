@@ -2,7 +2,6 @@
 import asyncio
 import html
 import os
-import signal
 import sqlite3
 import sys
 import time
@@ -829,19 +828,15 @@ async def reply_blocked(update: Update):
 
 
 async def safe_edit_text(message, text, reply_markup=None, parse_mode=None):
-    """Ignore Telegram no-op edit errors for repeated admin clicks. Validate HTML entities."""
+    """Ignore Telegram no-op edit errors for repeated admin clicks."""
     try:
-        # Validate HTML entities if using HTML parse mode
-        if parse_mode == "HTML":
-            text = validate_html_entities(text)
-        
         await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as exc:
         if "Message is not modified" in str(exc):
             return
         if "Can't parse entities" in str(exc):
-            # Fallback to plain text if HTML parsing fails
-            print(f"[WARN] HTML parsing error, sending as plain text: {exc}")
+            # Fallback to plain text if parsing fails
+            print(f"[WARN] Entity parsing error, sending as plain text: {exc}")
             try:
                 await message.edit_text(text, reply_markup=reply_markup, parse_mode=None)
             except Exception as e:
@@ -850,29 +845,7 @@ async def safe_edit_text(message, text, reply_markup=None, parse_mode=None):
             raise
 
 
-def validate_html_entities(text):
-    """Ensure HTML entities are properly balanced and valid."""
-    # Count balanced tags
-    tags = ["pre", "code", "b", "i", "u", "s"]
-    
-    for tag in tags:
-        open_count = text.count(f"<{tag}>")
-        close_count = text.count(f"</{tag}>")
-        
-        if open_count != close_count:
-            # If tags are mismatched, escape all HTML to be safe
-            return html.escape(text)
-    
-    # Check for invalid tag syntax
-    import re
-    invalid_tags = re.findall(r"<(\w+)[^>]*>(?!/>)", text)
-    
-    for tag in invalid_tags:
-        if tag not in ["pre", "code", "b", "i", "u", "s", "a", "em", "strong"]:
-            # If there's an invalid tag, escape the whole thing
-            return html.escape(text)
-    
-    return text
+
 
 
 def format_duration(seconds):
@@ -1417,43 +1390,10 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def format_code_snippets(text):
-    """Format code snippets for Telegram HTML format with proper entity validation."""
-    import re
-
-    # First, escape all HTML special characters
-    text = html.escape(text)
-    
-    # Convert markdown code blocks to HTML
-    pattern = r"&lt;pre&gt;(?:\w+)?\n?(.*?)&lt;/pre&gt;|```(?:\w+)?\n(.*?)```"
-    
-    def replace_code_block(match):
-        code_content = match.group(1) or match.group(2) or ""
-        code_content = code_content.strip()
-        # HTML entities are already escaped at this point
-        return f"<pre>{code_content}</pre>"
-    
-    formatted_text = re.sub(pattern, replace_code_block, text, flags=re.DOTALL)
-    
-    # Convert inline code markers to HTML code tags
-    inline_pattern = r"&lt;code&gt;([^&]+)&lt;/code&gt;|`([^`]+)`"
-    
-    def replace_inline_code(match):
-        code_content = match.group(1) or match.group(2) or ""
-        return f"<code>{code_content}</code>"
-    
-    formatted_text = re.sub(inline_pattern, replace_inline_code, formatted_text)
-    
-    # Validate that all pre and code tags are properly closed
-    open_pre = formatted_text.count("<pre>")
-    close_pre = formatted_text.count("</pre>")
-    open_code = formatted_text.count("<code>")
-    close_code = formatted_text.count("</code>")
-    
-    # If tags are mismatched, return plain escaped text for safety
-    if open_pre != close_pre or open_code != close_code:
-        return html.escape(text)
-    
-    return formatted_text
+    """Format code snippets for Telegram using plain text (safest approach)."""
+    # Return plain text - Telegram will display it as-is
+    # This avoids HTML entity parsing errors
+    return text
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1511,28 +1451,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.save_message(uid, "ai", reply)
 
     formatted_reply = format_code_snippets(reply)
-    formatted_reply = validate_html_entities(formatted_reply)
 
     if len(formatted_reply) > 4096:
         chunks = [formatted_reply[i : i + 4096] for i in range(0, len(formatted_reply), 4096)]
-        try:
-            await safe_edit_text(loading_msg, chunks[0], parse_mode="HTML")
-        except Exception as e:
-            # Fallback to plain text
-            await safe_edit_text(loading_msg, chunks[0], parse_mode=None)
-        
+        await safe_edit_text(loading_msg, chunks[0])
         for chunk in chunks[1:]:
-            try:
-                await update.message.reply_text(chunk, parse_mode="HTML")
-            except Exception as e:
-                # Fallback to plain text for this chunk
-                await update.message.reply_text(chunk, parse_mode=None)
+            await update.message.reply_text(chunk)
     else:
-        try:
-            await safe_edit_text(loading_msg, formatted_reply, parse_mode="HTML")
-        except Exception as e:
-            # Fallback to plain text
-            await safe_edit_text(loading_msg, formatted_reply, parse_mode=None)
+        await safe_edit_text(loading_msg, formatted_reply)
 
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1676,28 +1602,14 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.save_message(uid, "ai", reply)
 
     formatted_reply = format_code_snippets(reply)
-    formatted_reply = validate_html_entities(formatted_reply)
 
     if len(formatted_reply) > 4096:
         chunks = [formatted_reply[i : i + 4096] for i in range(0, len(formatted_reply), 4096)]
-        try:
-            await safe_edit_text(query.message, chunks[0], parse_mode="HTML")
-        except Exception as e:
-            # Fallback to plain text
-            await safe_edit_text(query.message, chunks[0], parse_mode=None)
-        
+        await safe_edit_text(query.message, chunks[0])
         for chunk in chunks[1:]:
-            try:
-                await query.message.reply_text(chunk, parse_mode="HTML")
-            except Exception as e:
-                # Fallback to plain text for this chunk
-                await query.message.reply_text(chunk, parse_mode=None)
+            await query.message.reply_text(chunk)
     else:
-        try:
-            await safe_edit_text(query.message, formatted_reply, parse_mode="HTML")
-        except Exception as e:
-            # Fallback to plain text
-            await safe_edit_text(query.message, formatted_reply, parse_mode=None)
+        await safe_edit_text(query.message, formatted_reply)
 
 
 app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
@@ -1750,45 +1662,33 @@ print(startup_msg)
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-loop = asyncio.new_event_loop()
-asyncio.set_event_loop(loop)
+max_retries = 3
+retry_count = 0
+retry_delay = 5
 
-async def run_bot_with_retry():
-    """Run bot with graceful handling for polling conflicts."""
-    max_retries = 3
-    retry_delay = 5
-    retry_count = 0
-    
-    while retry_count < max_retries:
-        try:
-            print("[INFO] Starting bot polling...")
-            await app.run_polling(allowed_updates=Update.ALL_TYPES)
-            break  # Exit loop if successful
-        except Exception as e:
-            error_msg = str(e)
+while retry_count < max_retries:
+    try:
+        print("[INFO] Starting bot polling...")
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+        break  # Exit loop if successful
+    except KeyboardInterrupt:
+        print("\n[INFO] Bot stopped by user")
+        break
+    except Exception as e:
+        error_msg = str(e)
+        
+        # Handle specific polling conflict error
+        if "terminated by other getUpdates request" in error_msg or "Conflict" in error_msg or "Another" in error_msg:
+            retry_count += 1
+            print(f"[WARN] Polling conflict detected (Retry {retry_count}/{max_retries} in {retry_delay}s)")
             
-            # Handle specific polling conflict error
-            if "terminated by other getUpdates request" in error_msg or "Conflict" in error_msg or "Another" in error_msg:
-                retry_count += 1
-                print(f"[WARN] Polling conflict detected (Retry {retry_count}/{max_retries} in {retry_delay}s): {error_msg}")
-                
-                if retry_count >= max_retries:
-                    print("[ERROR] Max retries exceeded for polling conflict.")
-                    sys.exit(1)
-                
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
-            else:
-                # For other errors, just exit
-                print(f"[ERROR] Fatal error during polling: {e}")
+            if retry_count >= max_retries:
+                print("[ERROR] Max retries exceeded for polling conflict.")
                 sys.exit(1)
-
-try:
-    loop.run_until_complete(run_bot_with_retry())
-except KeyboardInterrupt:
-    print("\n[INFO] Bot stopped by user")
-except Exception as e:
-    print(f"[ERROR] Unexpected error: {e}")
-    sys.exit(1)
-finally:
-    loop.close()
+            
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
+        else:
+            # For other errors, just exit
+            print(f"[ERROR] Fatal error during polling: {e}")
+            sys.exit(1)
