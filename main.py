@@ -2,6 +2,7 @@
 import asyncio
 import html
 import os
+import re
 import signal
 import sqlite3
 import sys
@@ -68,6 +69,11 @@ except FileNotFoundError:
     sys.stderr.write("WARNING: system-prompt.txt not found. Using default prompt.\n")
     SYSTEM_PROMPT = "You are a helpful AI assistant."
 
+CODE_FORMAT_INSTRUCTION = (
+    "When you include source code, always wrap it in triple backtick fenced code blocks "
+    "and specify the programming language whenever possible."
+)
+
 # Admin Configuration - Set your admin user IDs here
 ADMIN_IDS = {
     int(admin_id)
@@ -78,6 +84,7 @@ ADMIN_IDS = {
 # Pending admin actions tracker
 pending_admin_actions = {}
 user_last_messages = {}
+rate_limit_reset_tasks = {}
 
 # Decorative strings for reuse
 BLOCKED_MESSAGE = "Your access to this bot is currently blocked. Please contact the admin."
@@ -173,6 +180,16 @@ class ConversationDB:
 
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS rate_limit_reset_reminders (
+                    user_id INTEGER PRIMARY KEY,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (user_id) REFERENCES users(user_id)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_rate_limit_events_user_created_at
                 ON rate_limit_events(user_id, created_at)
                 """
@@ -182,6 +199,13 @@ class ConversationDB:
                 """
                 CREATE INDEX IF NOT EXISTS idx_user_quota_grants_user_expires_at
                 ON user_quota_grants(user_id, expires_at)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_rate_limit_reset_reminders_created_at
+                ON rate_limit_reset_reminders(created_at)
                 """
             )
 
@@ -442,6 +466,66 @@ class ConversationDB:
                 "active_grants": [],
             }
 
+    def upsert_rate_limit_reset_reminder(self, user_id):
+        """Persist that a user is waiting for a rate-limit reset notice."""
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO rate_limit_reset_reminders (user_id, created_at)
+                VALUES (?, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    created_at = CURRENT_TIMESTAMP
+                """,
+                (user_id,),
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Error saving rate-limit reminder: {e}\n")
+            return False
+
+    def delete_rate_limit_reset_reminder(self, user_id):
+        """Delete a persisted rate-limit reset notice for a user."""
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                DELETE FROM rate_limit_reset_reminders
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            )
+            conn.commit()
+            deleted = cursor.rowcount > 0
+            conn.close()
+            return deleted
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Error deleting rate-limit reminder: {e}\n")
+            return False
+
+    def get_rate_limit_reset_reminder_user_ids(self):
+        """Return users who should receive a rate-limit reset notice later."""
+        try:
+            conn = self._connect()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM rate_limit_reset_reminders
+                ORDER BY datetime(created_at) ASC, user_id ASC
+                """
+            )
+            user_ids = [int(row["user_id"]) for row in cursor.fetchall()]
+            conn.close()
+            return user_ids
+        except Exception as e:
+            sys.stderr.write(f"[ERROR] Error loading rate-limit reminders: {e}\n")
+            return []
+
     def get_total_users(self, exclude_user_ids=None):
         """Return total registered users."""
         try:
@@ -696,22 +780,23 @@ def build_conversation_messages(user_id, prompt):
     return messages
 
 
-def ask_model(messages):
-    """Call the model with one retry on failure."""
+async def ask_model(messages):
+    """Call the model with async-friendly retries."""
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
         "Content-Type": "application/json",
     }
     payload = {
         "model": MODEL_NAME,
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, *messages],
+        "messages": [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CODE_FORMAT_INSTRUCTION}"}, *messages],
     }
 
     last_error = "Unknown API error"
 
     for attempt in range(1, API_MAX_RETRIES + 1):
         try:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 f"{BASE_URL}/chat/completions",
                 json=payload,
                 headers=headers,
@@ -746,7 +831,7 @@ def ask_model(messages):
             last_error = str(exc)
             print(f"[ERROR] API call failed on attempt {attempt}: {last_error}")
             if attempt < API_MAX_RETRIES:
-                time.sleep(API_RETRY_DELAY_SECONDS)
+                await asyncio.sleep(API_RETRY_DELAY_SECONDS)
                 continue
             raise RuntimeError(last_error)
 
@@ -828,22 +913,34 @@ async def reply_blocked(update: Update):
         await update.callback_query.answer(BLOCKED_MESSAGE, show_alert=True)
 
 
-async def safe_edit_text(message, text, reply_markup=None, parse_mode=None):
+async def safe_edit_text(message, text, reply_markup=None, parse_mode=None, fallback_text=None):
     """Ignore Telegram no-op edit errors for repeated admin clicks."""
     try:
         await message.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
     except Exception as exc:
         if "Message is not modified" in str(exc):
             return
-        if "Can't parse entities" in str(exc):
-            # Fallback to plain text if HTML parsing fails
+        if parse_mode and "Can't parse entities" in str(exc):
+            plain_text = fallback_text if fallback_text is not None else text
             print(f"[WARN] Entity parsing error, sending as plain text: {exc}")
             try:
-                await message.edit_text(text, reply_markup=reply_markup, parse_mode=None)
+                await message.edit_text(plain_text, reply_markup=reply_markup, parse_mode=None)
             except Exception as e:
                 print(f"[ERROR] Failed to edit message: {e}")
         else:
             raise
+
+
+async def safe_reply_text(message, text, reply_markup=None, parse_mode=None, fallback_text=None):
+    """Reply with parse-mode fallback when Telegram rejects formatted entities."""
+    try:
+        return await message.reply_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception as exc:
+        if parse_mode and "Can't parse entities" in str(exc):
+            plain_text = fallback_text if fallback_text is not None else text
+            print(f"[WARN] Entity parsing error, replying as plain text: {exc}")
+            return await message.reply_text(plain_text, reply_markup=reply_markup, parse_mode=None)
+        raise
 
 
 
@@ -865,8 +962,8 @@ def format_duration(seconds):
     return " ".join(parts) if parts else "less than 1 minute"
 
 
-def get_rate_limit_reset_hint(oldest_recent, window_hours):
-    """Estimate when the next request slot becomes available."""
+def get_rate_limit_reset_seconds(oldest_recent, window_hours):
+    """Return seconds until the next rate-limit slot is available."""
     if not oldest_recent:
         return None
 
@@ -877,8 +974,13 @@ def get_rate_limit_reset_hint(oldest_recent, window_hours):
 
     reset_at = oldest_dt + timedelta(hours=window_hours)
     seconds_left = (reset_at - datetime.utcnow()).total_seconds()
+    return int(seconds_left) + 1 if seconds_left > 0 else None
 
-    if seconds_left <= 0:
+
+def get_rate_limit_reset_hint(oldest_recent, window_hours):
+    """Estimate when the next request slot becomes available."""
+    seconds_left = get_rate_limit_reset_seconds(oldest_recent, window_hours)
+    if not seconds_left:
         return None
 
     return format_duration(seconds_left)
@@ -920,6 +1022,168 @@ def build_rate_limit_exceeded_text(status):
         lines.append(f"Active bonus questions: {status['bonus_count']}")
 
     return "\n".join(lines)
+
+
+def build_rate_limit_status_text(status):
+    """Build user-facing rate-limit usage summary."""
+    reset_hint = get_rate_limit_reset_hint(status["oldest_recent"], status["window_hours"])
+    lines = [
+        style_heading("Rate Limit Status"),
+        "",
+        f"Allowed: {status['total_limit']} question(s) in {status['window_hours']} hour(s).",
+        f"Used: {status['used_count']}",
+        f"Remaining: {status['remaining']}",
+    ]
+
+    if reset_hint:
+        lines.append(f"Next slot opens in about: {reset_hint}")
+    else:
+        lines.append("Status: You can ask more questions right now.")
+
+    if status["bonus_count"] > 0:
+        lines.append(f"Active bonus questions: {status['bonus_count']}")
+
+    return "\n".join(lines)
+
+
+def build_rate_limit_reached_notice_text(status):
+    """Build a warning shown right after the user spends the final available question."""
+    reset_hint = get_rate_limit_reset_hint(status["oldest_recent"], status["window_hours"])
+    wait_line = "AI replies are now paused until the rate-limit window resets."
+
+    if reset_hint:
+        wait_line = f"AI replies are now paused. Please wait about {reset_hint} for the next slot."
+
+    return "\n".join(
+        [
+            style_heading("Rate limit fully used."),
+            "",
+            f"You have used all {status['total_limit']} question(s) in this {status['window_hours']}-hour window.",
+            wait_line,
+        ]
+    )
+
+
+def build_rate_limit_reset_notice_text(status):
+    """Build a proactive message sent when the window becomes available again."""
+    return "\n".join(
+        [
+            style_heading("Rate limit reset."),
+            "",
+            f"You can use the AI again now.",
+            f"Available now: {status['remaining']} question(s)",
+            f"Window: {status['total_limit']} question(s) / {status['window_hours']} hour(s)",
+        ]
+    )
+
+
+def cancel_rate_limit_reset_task(user_id, clear_persisted=False):
+    """Cancel a pending reset notification task for a user."""
+    task = rate_limit_reset_tasks.pop(user_id, None)
+    if task and not task.done():
+        task.cancel()
+    if clear_persisted:
+        db.delete_rate_limit_reset_reminder(user_id)
+
+
+async def run_rate_limit_reset_notifier(application, user_id, wait_seconds):
+    """Notify a user when their rate-limit window becomes available again."""
+    current_task = asyncio.current_task()
+
+    try:
+        await asyncio.sleep(wait_seconds)
+        status = db.get_user_rate_limit_status(user_id)
+
+        if db.is_user_blocked(user_id):
+            db.delete_rate_limit_reset_reminder(user_id)
+            return
+
+        if status["remaining"] > 0:
+            await application.bot.send_message(
+                chat_id=user_id,
+                text=build_rate_limit_reset_notice_text(status),
+            )
+            db.delete_rate_limit_reset_reminder(user_id)
+            return
+
+        rate_limit_reset_tasks.pop(user_id, None)
+        schedule_rate_limit_reset_notice(application, user_id, status, persist=False)
+    except asyncio.CancelledError:
+        return
+    except Exception as exc:
+        print(f"[ERROR] Failed to send rate-limit reset notice to {user_id}: {exc}")
+    finally:
+        if rate_limit_reset_tasks.get(user_id) is current_task:
+            rate_limit_reset_tasks.pop(user_id, None)
+
+
+def schedule_rate_limit_reset_notice(application, user_id, status, persist=True):
+    """Schedule a one-time notification for when the user's window resets."""
+    wait_seconds = get_rate_limit_reset_seconds(status["oldest_recent"], status["window_hours"])
+    if not wait_seconds:
+        return
+
+    cancel_rate_limit_reset_task(user_id)
+    if persist:
+        db.upsert_rate_limit_reset_reminder(user_id)
+
+    rate_limit_reset_tasks[user_id] = application.create_task(
+        run_rate_limit_reset_notifier(application, user_id, wait_seconds),
+        name=f"rate-limit-reset-{user_id}",
+    )
+
+
+async def restore_rate_limit_reset_notices(application):
+    """Restore pending rate-limit reset reminders from SQLite on startup."""
+    pending_user_ids = db.get_rate_limit_reset_reminder_user_ids()
+    if not pending_user_ids:
+        return
+
+    restored_count = 0
+    sent_count = 0
+    cleared_count = 0
+
+    for user_id in pending_user_ids:
+        status = db.get_user_rate_limit_status(user_id)
+
+        if db.is_user_blocked(user_id):
+            db.delete_rate_limit_reset_reminder(user_id)
+            cleared_count += 1
+            continue
+
+        if status["remaining"] > 0:
+            try:
+                await application.bot.send_message(
+                    chat_id=user_id,
+                    text=build_rate_limit_reset_notice_text(status),
+                )
+                sent_count += 1
+            except Exception as exc:
+                print(f"[ERROR] Failed to restore rate-limit notice for {user_id}: {exc}")
+                continue
+
+            db.delete_rate_limit_reset_reminder(user_id)
+            cleared_count += 1
+            continue
+
+        schedule_rate_limit_reset_notice(application, user_id, status, persist=False)
+        restored_count += 1
+
+    print(
+        f"[INFO] Restored rate-limit reminders: scheduled={restored_count}, "
+        f"sent_now={sent_count}, cleared={cleared_count}"
+    )
+
+
+async def notify_if_rate_limit_just_reached(application, user_id, reply_message):
+    """Warn the user immediately after they spend the final available question."""
+    status = db.get_user_rate_limit_status(user_id)
+    if status["remaining"] > 0:
+        cancel_rate_limit_reset_task(user_id, clear_persisted=True)
+        return
+
+    schedule_rate_limit_reset_notice(application, user_id, status)
+    await safe_reply_text(reply_message, build_rate_limit_reached_notice_text(status))
 
 
 def parse_quota_grant_text(text):
@@ -1234,6 +1498,8 @@ async def process_admin_quota_grant(update: Update, quota_text):
 
     clear_pending_admin_action(admin_id)
     rate_status = db.get_user_rate_limit_status(user_id)
+    if rate_status["remaining"] > 0:
+        cancel_rate_limit_reset_task(user_id, clear_persisted=True)
 
     confirmation = "\n".join(
         [
@@ -1247,6 +1513,18 @@ async def process_admin_quota_grant(update: Update, quota_text):
         ]
     )
     await update.message.reply_text(confirmation, reply_markup=build_dashboard_keyboard())
+
+
+def build_start_keyboard():
+    """Build the default keyboard shown to regular users."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Rate Limit", callback_data="user:rate_limit"),
+                InlineKeyboardButton("Developer", url="https://t.me/mengheang25"),
+            ]
+        ]
+    )
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1291,9 +1569,7 @@ Use /history to view past conversations
 Let's Explore {lightning} {skull}
 {line}"""
 
-    keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("Developer", url="https://t.me/mengheang25")]]
-    )
+    keyboard = build_start_keyboard()
 
     try:
         image_path = "how-cybercriminals-are-using-genai-like-wormgpt-and-v0-ijdhl7mcrnte1.webp"
@@ -1388,9 +1664,226 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_dashboard_message(update.message, user.id, edit=False)
 
 
+FENCED_CODE_PATTERN = re.compile(r"```([^\n`]*)\n(.*?)```", re.DOTALL)
+INLINE_CODE_PATTERN = re.compile(r"`([^`\n]+)`")
+
+
+def split_plain_text(text, max_length=4096):
+    """Split plain text into Telegram-safe chunks."""
+    if len(text) <= max_length:
+        return [text]
+
+    chunks = []
+    current = ""
+
+    for line in text.splitlines(keepends=True) or [text]:
+        if len(line) > max_length:
+            if current:
+                chunks.append(current)
+                current = ""
+
+            for start in range(0, len(line), max_length):
+                chunks.append(line[start : start + max_length])
+            continue
+
+        if current and len(current) + len(line) > max_length:
+            chunks.append(current)
+            current = line
+        else:
+            current += line
+
+    if current:
+        chunks.append(current)
+
+    return chunks or [text]
+
+
+def split_text_for_escaped_length(text, max_escaped_length):
+    """Split text while accounting for HTML entity expansion."""
+    max_escaped_length = max(1, max_escaped_length)
+    chunks = []
+    current = ""
+    current_length = 0
+
+    for line in text.splitlines(keepends=True) or [text]:
+        line_length = len(html.escape(line))
+
+        if line_length <= max_escaped_length:
+            if current and current_length + line_length > max_escaped_length:
+                chunks.append(current)
+                current = ""
+                current_length = 0
+
+            current += line
+            current_length += line_length
+            continue
+
+        for char in line:
+            char_length = len(html.escape(char))
+
+            if current and current_length + char_length > max_escaped_length:
+                chunks.append(current)
+                current = char
+                current_length = char_length
+            else:
+                current += char
+                current_length += char_length
+
+    if current or not chunks:
+        chunks.append(current)
+
+    return chunks
+
+
+def sanitize_code_language(language):
+    """Normalize fenced-code language names for Telegram HTML."""
+    if not language:
+        return ""
+
+    candidate = language.strip().split()[0].lower()
+    return re.sub(r"[^a-z0-9_+.-]", "", candidate)
+
+
+def parse_inline_code_segments(text):
+    """Split a plain-text segment into text and inline-code parts."""
+    segments = []
+    last_end = 0
+
+    for match in INLINE_CODE_PATTERN.finditer(text):
+        if match.start() > last_end:
+            segments.append({"type": "text", "content": text[last_end : match.start()]})
+
+        segments.append({"type": "inline_code", "content": match.group(1)})
+        last_end = match.end()
+
+    if last_end < len(text):
+        segments.append({"type": "text", "content": text[last_end:]})
+
+    return segments or [{"type": "text", "content": text}]
+
+
+def parse_response_segments(text):
+    """Split model output into plain text, inline code, and fenced code blocks."""
+    segments = []
+    last_end = 0
+
+    for match in FENCED_CODE_PATTERN.finditer(text):
+        if match.start() > last_end:
+            segments.extend(parse_inline_code_segments(text[last_end : match.start()]))
+
+        segments.append(
+            {
+                "type": "code_block",
+                "language": sanitize_code_language(match.group(1)),
+                "content": match.group(2),
+            }
+        )
+        last_end = match.end()
+
+    if last_end < len(text):
+        segments.extend(parse_inline_code_segments(text[last_end:]))
+
+    return segments or [{"type": "text", "content": text}]
+
+
+def build_code_block_wrappers(language):
+    """Build Telegram HTML wrappers for code blocks."""
+    if language:
+        return f'<pre><code class="language-{language}">', "</code></pre>"
+
+    return "<pre>", "</pre>"
+
+
+def split_formatted_segment(segment, max_length=4096):
+    """Convert one segment into one or more Telegram-safe message pieces."""
+    segment_type = segment["type"]
+
+    if segment_type == "text":
+        return [
+            {"text": html.escape(piece), "fallback_text": piece, "parse_mode": "HTML"}
+            for piece in split_text_for_escaped_length(segment["content"], max_length)
+            if piece
+        ]
+
+    if segment_type == "inline_code":
+        prefix = "<code>"
+        suffix = "</code>"
+        content_limit = max(1, max_length - len(prefix) - len(suffix))
+        return [
+            {
+                "text": f"{prefix}{html.escape(piece)}{suffix}",
+                "fallback_text": f"`{piece}`",
+                "parse_mode": "HTML",
+            }
+            for piece in split_text_for_escaped_length(segment["content"], content_limit)
+            if piece or segment["content"] == ""
+        ]
+
+    prefix, suffix = build_code_block_wrappers(segment.get("language", ""))
+    content_limit = max(1, max_length - len(prefix) - len(suffix))
+    language_label = segment.get("language", "")
+    fallback_prefix = f"```{language_label}\n" if language_label else "```\n"
+
+    return [
+        {
+            "text": f"{prefix}{html.escape(piece)}{suffix}",
+            "fallback_text": f"{fallback_prefix}{piece}\n```",
+            "parse_mode": "HTML",
+        }
+        for piece in split_text_for_escaped_length(segment["content"], content_limit)
+        if piece or segment["content"] == ""
+    ]
+
+
 def format_code_snippets(text):
-    """Return text as-is to avoid HTML entity parsing errors."""
-    return text
+    """Render model output with Telegram HTML code blocks and safe chunking."""
+    segments = parse_response_segments(text)
+    has_code = any(segment["type"] != "text" for segment in segments)
+
+    if not has_code:
+        return [{"text": chunk, "fallback_text": chunk, "parse_mode": None} for chunk in split_plain_text(text)]
+
+    chunks = []
+    current_chunk = {"text": "", "fallback_text": "", "parse_mode": "HTML"}
+
+    for segment in segments:
+        for piece in split_formatted_segment(segment):
+            if not current_chunk["text"]:
+                current_chunk = piece.copy()
+                continue
+
+            if len(current_chunk["text"]) + len(piece["text"]) <= 4096:
+                current_chunk["text"] += piece["text"]
+                current_chunk["fallback_text"] += piece["fallback_text"]
+            else:
+                chunks.append(current_chunk)
+                current_chunk = piece.copy()
+
+    if current_chunk["text"] or not chunks:
+        chunks.append(current_chunk)
+
+    return chunks
+
+
+async def send_ai_response(edit_message, reply_message, response_text):
+    """Send a model response with code-block formatting and chunk support."""
+    response_chunks = format_code_snippets(response_text)
+    first_chunk = response_chunks[0]
+
+    await safe_edit_text(
+        edit_message,
+        first_chunk["text"],
+        parse_mode=first_chunk["parse_mode"],
+        fallback_text=first_chunk["fallback_text"],
+    )
+
+    for chunk in response_chunks[1:]:
+        await safe_reply_text(
+            reply_message,
+            chunk["text"],
+            parse_mode=chunk["parse_mode"],
+            fallback_text=chunk["fallback_text"],
+        )
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1418,8 +1911,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         rate_status = db.get_user_rate_limit_status(uid)
         if rate_status["remaining"] <= 0:
+            schedule_rate_limit_reset_notice(context.application, uid, rate_status)
             await update.message.reply_text(build_rate_limit_exceeded_text(rate_status))
             return
+        cancel_rate_limit_reset_task(uid, clear_persisted=True)
 
     user_last_messages[uid] = text
     model_messages = build_conversation_messages(uid, text)
@@ -1433,7 +1928,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await asyncio.sleep(1)
 
     try:
-        reply = ask_model(model_messages)
+        reply = await ask_model(model_messages)
     except RuntimeError as exc:
         await safe_edit_text(
             loading_msg,
@@ -1447,15 +1942,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.save_message(uid, "user", text)
     db.save_message(uid, "ai", reply)
 
-    formatted_reply = format_code_snippets(reply)
+    await send_ai_response(loading_msg, update.message, reply)
 
-    if len(formatted_reply) > 4096:
-        chunks = [formatted_reply[i : i + 4096] for i in range(0, len(formatted_reply), 4096)]
-        await safe_edit_text(loading_msg, chunks[0])
-        for chunk in chunks[1:]:
-            await update.message.reply_text(chunk)
-    else:
-        await safe_edit_text(loading_msg, formatted_reply)
+    if not is_admin(uid):
+        await notify_if_rate_limit_just_reached(context.application, uid, update.message)
 
 
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1560,12 +2050,21 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    await query.answer()
     uid = user.id
 
     if not is_admin(uid) and db.is_user_blocked(uid):
         await reply_blocked(update)
         return
+
+    if data == "user:rate_limit":
+        await query.answer("Rate limit status")
+        rate_status = db.get_user_rate_limit_status(uid)
+        if rate_status["remaining"] > 0:
+            cancel_rate_limit_reset_task(uid, clear_persisted=True)
+        await safe_reply_text(query.message, build_rate_limit_status_text(rate_status))
+        return
+
+    await query.answer()
 
     arrow = DECORATIONS["arrow"]
     lightning = DECORATIONS["lightning"]
@@ -1577,18 +2076,20 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(uid):
         rate_status = db.get_user_rate_limit_status(uid)
         if rate_status["remaining"] <= 0:
+            schedule_rate_limit_reset_notice(context.application, uid, rate_status)
             await safe_edit_text(query.message, build_rate_limit_exceeded_text(rate_status))
             return
+        cancel_rate_limit_reset_task(uid, clear_persisted=True)
 
     await safe_edit_text(query.message, f"{lightning} Processing {arrow} HeaNg[Black-Cyber] core...")
     await query.message.chat.send_action("typing")
-    await asyncio.sleep(0.8)
+    await asyncio.sleep(0.5)
 
     retry_prompt = user_last_messages[uid]
     retry_messages = build_conversation_messages(uid, retry_prompt)
 
     try:
-        reply = ask_model(retry_messages)
+        reply = await ask_model(retry_messages)
     except RuntimeError as exc:
         await safe_edit_text(query.message, f"API request failed after retry.\n{exc}")
         return
@@ -1598,15 +2099,10 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     db.save_message(uid, "ai", reply)
 
-    formatted_reply = format_code_snippets(reply)
+    await send_ai_response(query.message, query.message, reply)
 
-    if len(formatted_reply) > 4096:
-        chunks = [formatted_reply[i : i + 4096] for i in range(0, len(formatted_reply), 4096)]
-        await safe_edit_text(query.message, chunks[0])
-        for chunk in chunks[1:]:
-            await query.message.reply_text(chunk)
-    else:
-        await safe_edit_text(query.message, formatted_reply)
+    if not is_admin(uid):
+        await notify_if_rate_limit_just_reached(context.application, uid, query.message)
 
 
 async def error_handler(update, context):
@@ -1629,11 +2125,14 @@ async def error_handler(update, context):
         except Exception:
             pass
 
+async def post_init(application):
+    """Restore persisted background reminder tasks after bot startup."""
+    await restore_rate_limit_reset_notices(application)
 
 
 def build_application():
     """Create and configure the Telegram application."""
-    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
     application.add_error_handler(error_handler)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("history", show_history))
@@ -1685,6 +2184,12 @@ def is_polling_conflict_error(exc):
     )
 
 
+def wait_for_retry_delay(seconds):
+    """Pause between startup retries without using blocking time.sleep."""
+    loop = ensure_event_loop()
+    loop.run_until_complete(asyncio.sleep(seconds))
+
+
 def run_bot_with_retry():
     """Run bot with graceful handling for polling conflicts."""
     max_retries = 3
@@ -1709,7 +2214,7 @@ def run_bot_with_retry():
                     print("[ERROR] Max retries exceeded for polling conflict.")
                     return 1
 
-                time.sleep(retry_delay)
+                wait_for_retry_delay(retry_delay)
                 retry_delay = min(retry_delay * 2, 60)
                 continue
 
