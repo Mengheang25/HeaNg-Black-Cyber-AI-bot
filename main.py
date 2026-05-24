@@ -1656,36 +1656,43 @@ startup_msg = f"""
 
 print(startup_msg)
 
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-
-max_retries = 3
-retry_count = 0
-retry_delay = 5
-
-while retry_count < max_retries:
-    try:
-        print("[INFO] Starting bot polling...")
-        app.run_polling(allowed_updates=Update.ALL_TYPES)
-        break  # Exit loop if successful
-    except KeyboardInterrupt:
-        print("\n[INFO] Bot stopped by user")
-        break
-    except Exception as e:
-        error_msg = str(e)
-        
-        # Handle specific polling conflict error
-        if "terminated by other getUpdates request" in error_msg or "Conflict" in error_msg or "Another" in error_msg:
-            retry_count += 1
-            print(f"[WARN] Polling conflict detected (Retry {retry_count}/{max_retries} in {retry_delay}s)")
+async def run_bot_with_retry():
+    """Run bot with graceful handling for polling conflicts."""
+    max_retries = 3
+    retry_delay = 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            print("[INFO] Starting bot polling...")
+            await app.run_polling(allowed_updates=Update.ALL_TYPES)
+            break  # Exit loop if successful
+        except KeyboardInterrupt:
+            print("\n[INFO] Bot stopped by user")
+            break
+        except Exception as e:
+            error_msg = str(e)
             
-            if retry_count >= max_retries:
-                print("[ERROR] Max retries exceeded for polling conflict.")
+            # Handle specific polling conflict error
+            if "terminated by other getUpdates request" in error_msg or "Conflict" in error_msg or "Another" in error_msg:
+                retry_count += 1
+                print(f"[WARN] Polling conflict detected (Retry {retry_count}/{max_retries} in {retry_delay}s)")
+                
+                if retry_count >= max_retries:
+                    print("[ERROR] Max retries exceeded for polling conflict.")
+                    sys.exit(1)
+                
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
+            else:
+                # For other errors, just exit
+                print(f"[ERROR] Fatal error during polling: {e}")
                 sys.exit(1)
-            
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
-        else:
-            # For other errors, just exit
-            print(f"[ERROR] Fatal error during polling: {e}")
-            sys.exit(1)
+
+try:
+    asyncio.run(run_bot_with_retry())
+except KeyboardInterrupt:
+    print("\n[INFO] Bot stopped by user")
+except Exception as e:
+    print(f"[ERROR] Unexpected error: {e}")
+    sys.exit(1)
