@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import atexit
 import html
 import os
 import re
@@ -7,7 +8,7 @@ import signal
 import sqlite3
 import sys
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from dotenv import load_dotenv
@@ -789,6 +790,7 @@ async def ask_model(messages):
     payload = {
         "model": MODEL_NAME,
         "messages": [{"role": "system", "content": f"{SYSTEM_PROMPT}\n\n{CODE_FORMAT_INSTRUCTION}"}, *messages],
+        "max_tokens": 4096,
     }
 
     last_error = "Unknown API error"
@@ -973,7 +975,7 @@ def get_rate_limit_reset_seconds(oldest_recent, window_hours):
         return None
 
     reset_at = oldest_dt + timedelta(hours=window_hours)
-    seconds_left = (reset_at - datetime.utcnow()).total_seconds()
+    seconds_left = (reset_at - datetime.now(timezone.utc)).total_seconds()
     return int(seconds_left) + 1 if seconds_left > 0 else None
 
 
@@ -1521,6 +1523,8 @@ def build_start_keyboard():
         [
             [
                 InlineKeyboardButton("Rate Limit", callback_data="user:rate_limit"),
+            ],
+            [
                 InlineKeyboardButton("Developer", url="https://t.me/mengheang25"),
             ]
         ]
@@ -1889,7 +1893,15 @@ async def send_ai_response(edit_message, reply_message, response_text):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     uid = user.id
-    text = update.message.text
+    
+    # Handle edited messages and messages without text
+    if update.edited_message:
+        text = update.edited_message.text
+    else:
+        text = update.message.text if update.message else None
+    
+    if not text:
+        return
 
     register_user(user)
 
@@ -2171,6 +2183,41 @@ def ensure_event_loop():
     return loop
 
 
+# Process lock to prevent multiple instances
+LOCK_FILE = ".bot.lock"
+
+def acquire_process_lock():
+    """Acquire an exclusive process lock; exit if another instance is running."""
+    if os.path.exists(LOCK_FILE):
+        try:
+            with open(LOCK_FILE, "r") as f:
+                old_pid = int(f.read().strip())
+            # Check if old process is still running
+            if sys.platform == "win32":
+                import subprocess
+                result = subprocess.run(["tasklist", "/FI", f"PID eq {old_pid}"], capture_output=True)
+                if b"No tasks" not in result.stdout:
+                    print(f"[ERROR] Another bot instance (PID {old_pid}) is already running.")
+                    print("[ERROR] Kill the old process or wait for it to finish.")
+                    sys.exit(1)
+            else:
+                os.kill(old_pid, 0)  # Check if process exists
+                print(f"[ERROR] Another bot instance (PID {old_pid}) is already running.")
+                sys.exit(1)
+        except (ValueError, ProcessLookupError, FileNotFoundError):
+            pass  # Old lock file is stale
+    
+    with open(LOCK_FILE, "w") as f:
+        f.write(str(os.getpid()))
+
+def release_process_lock():
+    """Remove the process lock file on exit."""
+    try:
+        if os.path.exists(LOCK_FILE):
+            os.remove(LOCK_FILE)
+    except Exception:
+        pass
+
 def is_polling_conflict_error(exc):
     """Return True if another bot instance is already polling updates."""
     error_msg = str(exc).lower()
@@ -2226,10 +2273,19 @@ def run_bot_with_retry():
 
 if __name__ == "__main__":
     try:
+        acquire_process_lock()
+        atexit.register(release_process_lock)
+        signal.signal(signal.SIGINT, lambda s, f: (
+            print("\n[INFO] Bot stopped by user"),
+            release_process_lock(),
+            sys.exit(0)
+        ))
         sys.exit(run_bot_with_retry())
     except KeyboardInterrupt:
         print("\n[INFO] Bot stopped by user")
+        release_process_lock()
         sys.exit(0)
     except Exception as e:
         print(f"[ERROR] Unexpected error: {e}")
+        release_process_lock()
         sys.exit(1)
