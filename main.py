@@ -2,6 +2,7 @@
 import asyncio
 import html
 import os
+import signal
 import sqlite3
 import sys
 import time
@@ -835,7 +836,7 @@ async def safe_edit_text(message, text, reply_markup=None, parse_mode=None):
         if "Message is not modified" in str(exc):
             return
         if "Can't parse entities" in str(exc):
-            # Fallback to plain text if parsing fails
+            # Fallback to plain text if HTML parsing fails
             print(f"[WARN] Entity parsing error, sending as plain text: {exc}")
             try:
                 await message.edit_text(text, reply_markup=reply_markup, parse_mode=None)
@@ -843,8 +844,6 @@ async def safe_edit_text(message, text, reply_markup=None, parse_mode=None):
                 print(f"[ERROR] Failed to edit message: {e}")
         else:
             raise
-
-
 
 
 
@@ -1390,9 +1389,7 @@ async def dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def format_code_snippets(text):
-    """Format code snippets for Telegram using plain text (safest approach)."""
-    # Return plain text - Telegram will display it as-is
-    # This avoids HTML entity parsing errors
+    """Return text as-is to avoid HTML entity parsing errors."""
     return text
 
 
