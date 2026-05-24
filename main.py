@@ -1609,9 +1609,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await safe_edit_text(query.message, formatted_reply)
 
 
-app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
-
 async def error_handler(update, context):
     """Log the error and send a message to the user."""
     arrow = DECORATIONS["arrow"]
@@ -1633,13 +1630,18 @@ async def error_handler(update, context):
             pass
 
 
-app.add_error_handler(error_handler)
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("history", show_history))
-app.add_handler(CommandHandler("clearhistory", clear_history))
-app.add_handler(CommandHandler(["dashboard", "dashoard"], dashboard))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-app.add_handler(CallbackQueryHandler(callback))
+
+def build_application():
+    """Create and configure the Telegram application."""
+    application = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    application.add_error_handler(error_handler)
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("history", show_history))
+    application.add_handler(CommandHandler("clearhistory", clear_history))
+    application.add_handler(CommandHandler(["dashboard", "dashoard"], dashboard))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CallbackQueryHandler(callback))
+    return application
 
 line = DECORATIONS["line_heavy"]
 arrow = DECORATIONS["arrow"]
@@ -1656,43 +1658,73 @@ startup_msg = f"""
 
 print(startup_msg)
 
-async def run_bot_with_retry():
+
+def ensure_event_loop():
+    """Ensure a usable event loop exists before PTB starts polling."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_closed():
+            raise RuntimeError("Current event loop is closed.")
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    return loop
+
+
+def is_polling_conflict_error(exc):
+    """Return True if another bot instance is already polling updates."""
+    error_msg = str(exc).lower()
+    return any(
+        marker in error_msg
+        for marker in (
+            "terminated by other getupdates request",
+            "another getupdates request",
+            "conflict",
+        )
+    )
+
+
+def run_bot_with_retry():
     """Run bot with graceful handling for polling conflicts."""
     max_retries = 3
     retry_delay = 5
-    retry_count = 0
-    
-    while retry_count < max_retries:
+
+    for attempt in range(1, max_retries + 1):
+        application = build_application()
+
         try:
+            ensure_event_loop()
             print("[INFO] Starting bot polling...")
-            await app.run_polling(allowed_updates=Update.ALL_TYPES)
-            break  # Exit loop if successful
+            application.run_polling(allowed_updates=Update.ALL_TYPES)
+            return 0
         except KeyboardInterrupt:
             print("\n[INFO] Bot stopped by user")
-            break
+            return 0
         except Exception as e:
-            error_msg = str(e)
-            
-            # Handle specific polling conflict error
-            if "terminated by other getUpdates request" in error_msg or "Conflict" in error_msg or "Another" in error_msg:
-                retry_count += 1
-                print(f"[WARN] Polling conflict detected (Retry {retry_count}/{max_retries} in {retry_delay}s)")
-                
-                if retry_count >= max_retries:
-                    print("[ERROR] Max retries exceeded for polling conflict.")
-                    sys.exit(1)
-                
-                await asyncio.sleep(retry_delay)
-                retry_delay = min(retry_delay * 2, 60)  # Exponential backoff, max 60s
-            else:
-                # For other errors, just exit
-                print(f"[ERROR] Fatal error during polling: {e}")
-                sys.exit(1)
+            if is_polling_conflict_error(e):
+                print(f"[WARN] Polling conflict detected (Retry {attempt}/{max_retries} in {retry_delay}s)")
 
-try:
-    asyncio.run(run_bot_with_retry())
-except KeyboardInterrupt:
-    print("\n[INFO] Bot stopped by user")
-except Exception as e:
-    print(f"[ERROR] Unexpected error: {e}")
-    sys.exit(1)
+                if attempt >= max_retries:
+                    print("[ERROR] Max retries exceeded for polling conflict.")
+                    return 1
+
+                time.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, 60)
+                continue
+
+            print(f"[ERROR] Fatal error during polling: {e}")
+            return 1
+
+    return 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(run_bot_with_retry())
+    except KeyboardInterrupt:
+        print("\n[INFO] Bot stopped by user")
+        sys.exit(0)
+    except Exception as e:
+        print(f"[ERROR] Unexpected error: {e}")
+        sys.exit(1)
