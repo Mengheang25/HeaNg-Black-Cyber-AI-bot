@@ -18,8 +18,8 @@ A powerful Telegram bot powered by OpenRouter AI with conversation history and p
 
 #### 1. Clone Repository
 ```bash
-git clone https://github.com/YOUR_USERNAME/wormgpt-demo.git
-cd wormgpt-demo
+git clone https://github.com/Mengheang25/WormGPT.git
+cd WormGPT
 ```
 
 #### 2. Create Environment
