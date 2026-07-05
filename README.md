@@ -1,4 +1,4 @@
-# HeaNg[Black-Cyber] Bot - AI Telegram Assistant
+# WormGPT Bot - AI Telegram Assistant
 
 A powerful Telegram bot powered by OpenRouter AI with conversation history and persistent storage.
 
