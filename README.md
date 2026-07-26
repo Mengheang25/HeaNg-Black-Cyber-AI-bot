@@ -1,4 +1,4 @@
-# WormGPT Bot - AI Telegram Assistant
+# HeaNg[Black-Cyber] AI Bot - AI Telegram Assistant
 
 A powerful Telegram bot powered by OpenRouter AI with conversation history and persistent storage.
 
@@ -18,8 +18,8 @@ A powerful Telegram bot powered by OpenRouter AI with conversation history and p
 
 #### 1. Clone Repository
 ```bash
-git clone https://github.com/Mengheang25/WormGPT.git
-cd WormGPT
+git clone https://github.com/Mengheang25/HeaNg-Black-Cyber-AI-bot.git
+cd HeaNg-Black-Cyber-AI-bot
 ```
 
 #### 2. Create Environment
