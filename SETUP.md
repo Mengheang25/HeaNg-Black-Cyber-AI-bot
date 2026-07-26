@@ -22,8 +22,8 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/wormgpt-demo.git
-cd wormgpt-demo
+git clone https://github.com/Mengheang25/HeaNg-Black-Cyber-AI-bot.git
+cd HeaNg-Black-Cyber-AI-bot
 
 # Or download as ZIP and extract
 ```
@@ -276,7 +276,7 @@ type .env            # Windows
 ## File Structure
 
 ```
-wormgpt-demo/
+HeaNg-Black-Cyber-AI-bot/
 ├── main.py                  # Main bot code
 ├── preflight_check.py       # Pre-deployment checks
 ├── requirements.txt         # Python dependencies
