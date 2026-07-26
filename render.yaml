@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: wormgpt-bot
+    name: HeaNg[Black-Cyber]-AI-bot
     runtime: python311
     plan: free
     buildCommand: pip install -r requirements.txt
