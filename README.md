@@ -154,7 +154,7 @@ conn.close()
 ## 📊 Project Structure
 
 ```
-wormgpt/
+HeaNg-Black-Cyber-AI-bot/
 ├── main.py                      # Main bot code
 ├── requirements.txt             # Python dependencies
 ├── Procfile                     # Render.com deployment
