@@ -21,10 +21,10 @@ git init
 git add .
 
 # Commit changes
-git commit -m "HeaNg[Black-Cyber] Bot - Render.com deployment ready"
+git commit -m "HeaNg-Black-Cyber-AI-bot - Render.com deployment ready"
 
 # Add remote repository
-git remote add origin https://github.com/YOUR_USERNAME/wormgpt-demo.git
+git remote add origin https://github.com/Mengheang25/HeaNg-Black-Cyber-AI-bot.git
 
 # Push to GitHub
 git push -u origin main
