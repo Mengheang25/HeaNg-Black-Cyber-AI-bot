@@ -1,7 +1,7 @@
 # HeaNg[Black-Cyber] AI Bot - AI Telegram Assistant
 
 <div align="center">
-  <img src="images/HeaNg[Black-Cyber] AI.jpg" alt="HeaNg AI" width="100%"/>
+  <img src="images/HeaNg[Black-Cyber] AI.jpg" width="100%"/>
 </div>
 
 A powerful Telegram bot powered by OpenRouter AI with conversation history and persistent storage.
