@@ -1576,7 +1576,7 @@ Let's Explore {lightning} {skull}
     keyboard = build_start_keyboard()
 
     try:
-        image_path = "how-cybercriminals-are-using-genai-like-wormgpt-and-v0-ijdhl7mcrnte1.webp"
+        image_path = "HeaNg[Black-Cyber] AI.jpg"
         with open(image_path, "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
