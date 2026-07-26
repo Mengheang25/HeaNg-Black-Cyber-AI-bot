@@ -159,7 +159,6 @@ HeaNg-Black-Cyber-AI-bot/
 ├── requirements.txt             # Python dependencies
 ├── Procfile                     # Render.com deployment
 ├── render.yaml                  # Render.com configuration
-├── .env                         # Environment variables (git ignored)
 ├── .env.example                 # Environment template
 ├── .gitignore                   # Git ignore rules
 ├── system-prompt.txt            # AI system prompt
