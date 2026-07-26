@@ -92,7 +92,6 @@ wormgpt-demo/
 ├── requirements.txt        # Python dependencies
 ├── system-prompt.txt       # AI system prompt
 ├── wormgpt_config.json     # Configuration (legacy)
-├── .env                    # Configuration (secret - git ignored)
 ├── .env.example            # Configuration template
 ├── .gitignore              # Git ignore rules
 ├── setup.sh                # Linux/Mac setup script
