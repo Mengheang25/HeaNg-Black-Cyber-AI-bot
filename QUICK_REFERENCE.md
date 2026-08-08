@@ -90,7 +90,7 @@ python main.py
 wormgpt-demo/
 ├── main.py                 # Main bot code
 ├── requirements.txt        # Python dependencies
-├── system-prompt.txt       # AI system prompt
+├── system_prompt.b         # AI system prompt
 ├── wormgpt_config.json     # Configuration (legacy)
 ├── .env.example            # Configuration template
 ├── .gitignore              # Git ignore rules
