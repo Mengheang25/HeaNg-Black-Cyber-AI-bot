@@ -1,5 +1,9 @@
 # HeaNg[Black-Cyber] AI Bot - AI Telegram Assistant
 
+<div align="center">
+  <img width="100%" src="HeaNg[Black-Cyber] AI.jpg" alt="HeaNg[Black-Cyber] AI">
+</div>
+
 A powerful Telegram bot powered by HeaNg[Black-Cyber] AI with conversation history and persistent storage.
 
 ## ✨ Features
