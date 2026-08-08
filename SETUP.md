@@ -285,7 +285,7 @@ HeaNg-Black-Cyber-AI-bot/
 ├── .env                     # Environment variables (created locally)
 ├── .env.example             # Template for .env
 ├── .gitignore               # Git ignore rules
-├── system-prompt.txt        # AI system prompt
+├── system_prompt.b          # AI system prompt
 ├── date_user.db             # SQLite database (created on first run)
 ├── .github/
 │   └── workflows/
@@ -314,7 +314,7 @@ HeaNg-Black-Cyber-AI-bot/
 - Deploy using [RENDER_DEPLOYMENT.md](RENDER_DEPLOYMENT.md)
 
 ### Advanced Configuration
-- Modify system prompt in `system-prompt.txt`
+- Modify system prompt in `system_prompt.b`
 - Change AI model in `.env`
 - Add custom commands to `main.py`
 - Implement additional features
