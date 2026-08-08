@@ -164,7 +164,7 @@ HeaNg-Black-Cyber-AI-bot/
 ├── render.yaml                  # Render.com configuration
 ├── .env.example                 # Environment template
 ├── .gitignore                   # Git ignore rules
-├── system-prompt.txt            # AI system prompt
+├── system_prompt.b              # AI system prompt
 ├── date_user.db                 # SQLite database
 ├── SECURITY.md                  # Security guide
 ├── IMPLEMENTATION.md            # Implementation reference
