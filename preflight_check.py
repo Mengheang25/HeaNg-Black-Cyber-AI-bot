@@ -74,13 +74,13 @@ def check_system_prompt():
     """Check if system prompt file exists"""
     print("\n[CHECK] Verifying system prompt...")
     
-    if os.path.exists("system-prompt.txt"):
-        with open("system-prompt.txt", "r", encoding="utf-8") as f:
+    if os.path.exists("system_prompt.b"):
+        with open("system_prompt.b", "r", encoding="utf-8") as f:
             prompt = f.read()
         print(f"[OK] System prompt found ({len(prompt)} bytes)")
         return True
     else:
-        print("[WARNING] system-prompt.txt not found, will use default prompt")
+        print("[WARNING] system_prompt.b not found, will use default prompt")
         return True
 
 def check_dependencies():
