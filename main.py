@@ -1576,7 +1576,7 @@ Let's Explore {lightning} {skull}
     keyboard = build_start_keyboard()
 
     try:
-        image_path = "HeaNg[Black-Cyber] AI.jpg"
+        image_path = "HeaNgBlack-Cyber.png"
         with open(image_path, "rb") as photo:
             await update.message.reply_photo(
                 photo=photo,
